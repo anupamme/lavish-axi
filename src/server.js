@@ -668,6 +668,14 @@ export async function serve({
   });
 
   app.post("/shutdown", (req, res) => {
+    // This terminates the whole process, so it must never be reachable from anything but the
+    // local machine - exposing it to LAN/Tailscale peers would let any client with network
+    // access kill the server with no authentication at all.
+    const remoteAddress = req.socket?.remoteAddress || "";
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remoteAddress)) {
+      res.status(403).json({ status: "forbidden" });
+      return;
+    }
     // The caller names the session it is about to reopen, and only that session's chrome is
     // reloaded. A call that names none reloads nothing. It also names why it is shutting this
     // server down, because the banner every other chrome shows has to be true for that reason;
