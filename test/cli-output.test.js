@@ -2985,8 +2985,9 @@ test("shutdownServerOnPort kills pre-handshake Lavish servers when shutdown does
       shutdowns += 1;
     },
     waitForPortFree: async () => portFreeResults.shift() ?? false,
-    killProcessOnPort: () => {
+    killServerProcess: () => {
       kills += 1;
+      return true;
     },
     processMatchesLavish: () => true,
   });
@@ -3008,8 +3009,9 @@ test("shutdownServerOnPort ignores unidentified health responders", async () => 
       shutdowns += 1;
     },
     waitForPortFree: async () => false,
-    killProcessOnPort: () => {
+    killServerProcess: () => {
       kills += 1;
+      return true;
     },
     processMatchesLavish: () => false,
   });
@@ -3127,8 +3129,9 @@ test("fetchJson reports interrupted response body failures without retrying", as
 test("stop command shuts down the running server on the configured port", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
   const server = await serve({ port: 0, stateFile: `${dir}/state.json`, version: "9.9.9-test" });
-  // stopCommand's control channel reads the credential from the well-known state dir (see
-  // AGENTS.md's /shutdown section), which the real CLI and the real server always share.
+  // stopCommand's control channel reads both the server's identity (state_id) and its shutdown
+  // credential from the well-known state dir (see AGENTS.md's /shutdown section), which the real
+  // CLI and the real server always share.
   const previousStateDir = process.env.LAVISH_AXI_STATE_DIR;
   process.env.LAVISH_AXI_STATE_DIR = dir;
   try {
