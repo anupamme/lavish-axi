@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
@@ -59,6 +59,7 @@ import { formatServerLogLine, serverStdioIsTimestamped } from "./server-log.js";
 import { injectLavishSdk } from "./html-transform.js";
 import {
   bindHost,
+  controlTokenFile,
   extraAllowedHosts,
   hostForUrl,
   IPV6_LOOPBACK_HOST,
@@ -250,6 +251,37 @@ export function isValidWhiteboardChannelToken(token, secret, sessionKey, now = D
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+// POST /shutdown terminates the whole process with no other precondition, so it needs a real
+// credential rather than trusting the immediate socket peer address: peer address is spoofable by
+// topology in both directions - it 403s a legitimate control-channel call through a pinned
+// non-loopback LAVISH_AXI_HOST (loopback is bound only as a fallback, so that pinned host can be
+// the only listener), and it does NOT stop a local reverse proxy forwarding an unauthenticated
+// remote request, because the proxy's own connection to this server is always loopback regardless
+// of who it is fronting. This control token is generated fresh per server start, persisted
+// owner-only beside state.json (never in it - it is not session state), and required on every
+// /shutdown request via the Lavish-Control-Token header, independent of which listener it arrives
+// on.
+export function isValidControlToken(header, token) {
+  if (typeof header !== "string" || !header) return false;
+  const actualBuffer = Buffer.from(header, "utf8");
+  const expectedBuffer = Buffer.from(token, "utf8");
+  return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+// Same atomic temp-file-then-rename shape as attachment/whiteboard sidecar writes: the mode is
+// applied at creation so the token is never briefly readable beyond the owner, and a crash mid-write
+// leaves only an orphaned temp file rather than a truncated token.
+async function writeControlTokenFile(file, token) {
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, token, { mode: 0o600 });
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 // A detached server should not live forever. When no browser chrome or agent poll
 // are connected for this long, the server shuts itself down so it stops dangling. The next
 // `lavish-axi <file>` invocation re-spawns a fresh server and adopts resumable sessions from
@@ -306,6 +338,10 @@ export async function serve({
   let resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale, fallbackHost: host });
   const app = express();
   const store = new SessionStore(stateFile);
+  // /shutdown's credential - written before any listener binds, so a caller who just got a
+  // healthy /health probe can always read a currently-valid token from disk.
+  const controlToken = crypto.randomBytes(32).toString("hex");
+  await writeControlTokenFile(controlTokenFile(stateFile), controlToken);
   const events = new EventEmitter();
   const watchers = new Map();
   const activePolls = new Map();
@@ -668,11 +704,9 @@ export async function serve({
   });
 
   app.post("/shutdown", (req, res) => {
-    // This terminates the whole process, so it must never be reachable from anything but the
-    // local machine - exposing it to LAN/Tailscale peers would let any client with network
-    // access kill the server with no authentication at all.
-    const remoteAddress = req.socket?.remoteAddress || "";
-    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remoteAddress)) {
+    // See the control-token comment above isValidControlToken: this terminates the whole
+    // process, so it needs a real credential, not the immediate socket peer address.
+    if (!isValidControlToken(req.headers["lavish-control-token"], controlToken)) {
       res.status(403).json({ status: "forbidden" });
       return;
     }

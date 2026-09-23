@@ -13,7 +13,12 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import { run, stopCommand, VERSION } from "../src/cli.js";
+import { controlTokenFile } from "../src/paths.js";
 import { serve } from "../src/server.js";
+
+async function controlTokenFor(dir) {
+  return (await readFile(controlTokenFile(path.join(dir, "state.json")), "utf8")).trim();
+}
 
 const SERVER_ENTRY = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
 
@@ -435,7 +440,10 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
         }
       }
       assert.equal(ready, true);
-      await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+      await fetch(`http://127.0.0.1:${port}/shutdown`, {
+        method: "POST",
+        headers: { "lavish-control-token": await controlTokenFor(dir) },
+      });
       const [code] = await once(child, "exit");
       assert.equal(code, 0);
     } finally {
@@ -529,7 +537,10 @@ net.Server.prototype.emit = function (event, ...args) {
           }
         }
         assert.equal(ready, true, "post-listen error must not take down the server");
-        await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+        await fetch(`http://127.0.0.1:${port}/shutdown`, {
+          method: "POST",
+          headers: { "lavish-control-token": await controlTokenFor(dir) },
+        });
         const [code] = await once(child, "exit");
         assert.equal(code, 0);
       } finally {
@@ -616,6 +627,7 @@ test("the control channel finds a fallen-back server on loopback", async () => {
         {
           LAVISH_AXI_PORT: String(server.port),
           LAVISH_AXI_HOST: UNBINDABLE_HOST,
+          LAVISH_AXI_STATE_DIR: dir,
         },
         () => stopCommand([]),
       );
@@ -649,6 +661,7 @@ test(
           {
             LAVISH_AXI_PORT: String(port),
             LAVISH_AXI_HOST: "::1",
+            LAVISH_AXI_STATE_DIR: dir,
           },
           () => stopCommand([]),
         );
@@ -677,6 +690,7 @@ test(
           {
             LAVISH_AXI_PORT: String(port),
             LAVISH_AXI_HOST: "::1",
+            LAVISH_AXI_STATE_DIR: dir,
           },
           () => stopCommand([]),
         );

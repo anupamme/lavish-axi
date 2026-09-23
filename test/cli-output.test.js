@@ -57,6 +57,7 @@ import {
   VERSION,
 } from "../src/cli.js";
 import { DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "../src/design-reference.js";
+import { controlTokenFile } from "../src/paths.js";
 import { resolveVsCodeSettingsFile } from "../src/plugin.js";
 import { createSkillMarkdown } from "../src/skill.js";
 import { SELF_PAINT_WARNING } from "../src/self-paint.js";
@@ -3126,12 +3127,18 @@ test("fetchJson reports interrupted response body failures without retrying", as
 test("stop command shuts down the running server on the configured port", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
   const server = await serve({ port: 0, stateFile: `${dir}/state.json`, version: "9.9.9-test" });
+  // stopCommand's control channel reads the credential from the well-known state dir (see
+  // AGENTS.md's /shutdown section), which the real CLI and the real server always share.
+  const previousStateDir = process.env.LAVISH_AXI_STATE_DIR;
+  process.env.LAVISH_AXI_STATE_DIR = dir;
   try {
     const output = await stopCommand(["--port", String(server.port)]);
     assert.deepEqual(output, { server: { status: "stopped", port: server.port } });
     await server.done;
     await assert.rejects(() => fetch(`http://127.0.0.1:${server.port}/health`), /fetch failed|ECONNREFUSED/);
   } finally {
+    if (previousStateDir === undefined) delete process.env.LAVISH_AXI_STATE_DIR;
+    else process.env.LAVISH_AXI_STATE_DIR = previousStateDir;
     await server.close();
     await rm(dir, { force: true, recursive: true });
   }
@@ -3271,8 +3278,12 @@ test("opening an artifact names that session as the one to reload across a versi
     assert.equal(code, 0, stderr);
     assert.deepEqual(recorder.bodies, [{ reload_key: sessionKey(await canonicalFile(artifact)), reason: "upgrade" }]);
   } finally {
-    // The CLI replaced the recorder with a real server on that port; stop it again.
-    await fetch(`${base}/shutdown`, { method: "POST" }).catch(() => {});
+    // The CLI replaced the recorder with a real server on that port; stop it again. That server
+    // now enforces the control-token credential (see AGENTS.md), so read the one it wrote.
+    const token = await readFile(controlTokenFile(path.join(stateDir, "state.json")), "utf8")
+      .then((value) => value.trim())
+      .catch(() => "");
+    await fetch(`${base}/shutdown`, { method: "POST", headers: { "lavish-control-token": token } }).catch(() => {});
     for (let i = 0; i < 30; i += 1) {
       const alive = await fetch(`${base}/health`).then(
         () => true,
